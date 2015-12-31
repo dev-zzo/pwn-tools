@@ -395,7 +395,7 @@ def main():
 
     scan_parser = subparsers.add_parser('scan', help='scan a device for valid IOCTLs')
     scan_parser.add_argument('device_path',
-        help='path to the device to fuzz')
+        help='path to the device to fuzz, eg \\Device\\Beep')
     scan_parser.add_argument('--scan-device',
         help='only scan the specified device type (in hex)',
         metavar='DEVICE_TYPE',
