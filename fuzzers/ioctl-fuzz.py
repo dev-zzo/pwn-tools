@@ -57,11 +57,21 @@ NtAllocateVirtualMemory = ctypes.windll.ntdll.NtAllocateVirtualMemory
 NtDeviceIoControlFile = ctypes.windll.ntdll.NtDeviceIoControlFile
 SetConsoleTitle = ctypes.windll.kernel32.SetConsoleTitleA
 
-FILE_READ_DATA = 0x0001
-FILE_WRITE_DATA = 0x0002
+FILE_READ_DATA = 0x00000001
+FILE_WRITE_DATA = 0x00000002
+FILE_READ_EA = 0x00000008
+FILE_WRITE_EA = 0x00000010
+FILE_READ_ATTRIBUTES = 0x00000080
+FILE_WRITE_ATTRIBUTES = 0x00000100
 
-FILE_GENERIC_READ = 0x00120089
-FILE_GENERIC_WRITE = 0x00120116
+READ_CONTROL = 0x00020000
+SYNCHRONIZE = 0x00100000
+
+FILE_READ_XXX = FILE_READ_ATTRIBUTES | FILE_READ_EA | FILE_READ_DATA
+FILE_WRITE_XXX = FILE_WRITE_ATTRIBUTES | FILE_WRITE_EA | FILE_WRITE_DATA
+
+FILE_GENERIC_READ = SYNCHRONIZE | READ_CONTROL | FILE_READ_XXX
+FILE_GENERIC_WRITE = SYNCHRONIZE | READ_CONTROL | FILE_WRITE_XXX
 
 FILE_SHARE_READWRITE = 3
 
@@ -161,6 +171,29 @@ def DeviceIoControl(handle, ioctl, input_ptr, input_length, output_ptr, output_l
         output_ptr, output_length)
     return to_unsigned(status)
 
+def TryOpenFile(path):
+    print('Opening the device...')
+    try:
+        handle = OpenFile(path, SYNCHRONIZE | READ_CONTROL | FILE_READ_DATA | FILE_WRITE_DATA)
+        print('Opened for R&W.')
+        return handle
+    except NtError:
+        pass
+    try:
+        handle = OpenFile(path, SYNCHRONIZE | READ_CONTROL | FILE_WRITE_DATA)
+        print('Opened for W.')
+        return handle
+    except NtError:
+        pass
+    try:
+        handle = OpenFile(path, SYNCHRONIZE | READ_CONTROL | FILE_READ_DATA)
+        print('Opened for R.')
+        return handle
+    except NtError:
+        pass
+    handle = OpenFile(path, SYNCHRONIZE | READ_CONTROL)
+    print('Opened for minimal access.')
+    return handle
 #
 # SCANNING
 #
@@ -247,7 +280,7 @@ def scan_device_type_range(handle, device_start, device_end, ioctls):
 def do_scan(args):
     "Main scanning function"
 
-    handle = OpenFile(args.device_path, FILE_GENERIC_READ|FILE_GENERIC_WRITE)
+    handle = TryOpenFile(args.device_path)
     ioctls = []
     if args.scan_device is None:
         device_type_low = 0x0000
@@ -258,11 +291,17 @@ def do_scan(args):
             device_type_low = 0x8000
         if device_type_low <= device_type_high:
             print('Scanning device type range %04X:%04X' % (device_type_low, device_type_high))
-            scan_device_type_range(handle, device_type_low, device_type_high, ioctls)
+            try:
+                scan_device_type_range(handle, device_type_low, device_type_high, ioctls)
+            except KeyboardInterrupt:
+                print('Interrupted.')
         else:
             print('Incorrect scan range.')
     else:
-        scan_device_type(handle, args.scan_device, ioctls)
+        try:
+            scan_device_type(handle, args.scan_device, ioctls)
+        except KeyboardInterrupt:
+            print('Interrupted.')
     print('Scan completed (%d IOCTL codes reported).' % len(ioctls))
     NtClose(handle)
     return ioctls
@@ -271,14 +310,15 @@ def do_scan(args):
 # FUZZING (GENERATION/RECORDING)
 #
 
-def fuzz_generate(input_length):
+__nasty_bytes = (0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0xFF)
+
+def fuzz_generate(buffer_ptr, input_length):
     "Generate the data passed to the ioctl"
 
-    nasty_bytes = (0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0xFF)
-    
+    global __nasty_bytes
     for offset in xrange(input_length):
         if random.random() <= 0.2:
-            buffer_ptr[offset] = random.choice(nasty_bytes)
+            buffer_ptr[offset] = random.choice(__nasty_bytes)
         offset += 1
 
 def fuzz_ioctl(handle, ioctl_code, buffer_limits, record=False):
@@ -294,12 +334,12 @@ def fuzz_ioctl(handle, ioctl_code, buffer_limits, record=False):
         input_ptr = BUFFER_BASE
 
         ctypes.memset(input_ptr, 0, 0x1000)
-        input_length = random.randint(buffer_limits[0][0], buffer_limits[0][1])
-        fuzz_generate(input_length)
+        input_length = random.randint(buffer_limits[0][0], buffer_limits[0][1] + 1)
+        fuzz_generate(buffer_ptr, input_length)
 
     # Non-default output length?
     if buffer_limits[1][0] > 0 or random.random() < 0.5:
-        output_length = random.randint(buffer_limits[1][0], buffer_limits[1][1])
+        output_length = random.randint(buffer_limits[1][0], buffer_limits[1][1] + 1)
 
     # Non-default output pointer?
     if buffer_limits[1][0] > 0 or random.random() < 0.5:
@@ -314,27 +354,38 @@ def fuzz_ioctl(handle, ioctl_code, buffer_limits, record=False):
 
     # Execute
     status = DeviceIoControl(handle, ioctl_code, input_ptr, input_length, output_ptr, output_length)
+    return status
 
 def do_fuzz(args):
     "Main fuzzing function"
 
-    # NOTE: not all access rights may be required -- adjust as needed.
-    handle = OpenFile(args.device_path, FILE_GENERIC_READ|FILE_GENERIC_WRITE)
+    handle = TryOpenFile(args.device_path)
 
     # Limit input and output buffer sizes.
     buffer_limits = ((args.min_input, args.max_input), (args.min_output, args.max_output))
 
-    # Loop forever.
-    counter = 0
-    counter2 = 0
-    while True:
-        fuzz_ioctl(handle, args.ioctl, buffer_limits, args.record)
-        counter += 1
-        if counter == 1000:
-            sys.stdout.write('.')
-            counter = 0
-            counter2 += 1
-            SetConsoleTitle('Fuzzing: iterations: %dk' % (counter2))
+    try:
+        result_stats = {}
+        counter = 0
+        counter2 = 0
+        # Loop forever.
+        while True:
+            status = fuzz_ioctl(handle, args.ioctl, buffer_limits, args.record)
+            try:
+                result_stats[status] = result_stats[status] + 1
+            except KeyError:
+                result_stats[status] = 1
+            counter += 1
+            if counter == 10000:
+                sys.stdout.write('.')
+                counter = 0
+                counter2 += 1
+                SetConsoleTitle('Fuzzing: iterations: %dk' % (counter2 * 10))
+    except KeyboardInterrupt:
+        print('Interrupted.')
+    print('DeviceIoControl return status statistics:')
+    for status in sorted(result_stats.keys()):
+        print('%08X %d' % (status, result_stats[status]))
     NtClose(handle)
 
 #
@@ -355,7 +406,7 @@ def replay_store(ioctl_code, input_ptr, input_length, output_ptr, output_length)
         os.fsync(fp.fileno())
 
 def do_replay(args):
-    handle = OpenFile(args.device_path, FILE_GENERIC_READ|FILE_GENERIC_WRITE)
+    handle = TryOpenFile(args.device_path)
 
     fp = open('replay.dump', 'r')
     lineno = 1
@@ -395,7 +446,7 @@ def main():
 
     scan_parser = subparsers.add_parser('scan', help='scan a device for valid IOCTLs')
     scan_parser.add_argument('device_path',
-        help='path to the device to fuzz, eg \\Device\\Beep')
+        help='path to the device to fuzz')
     scan_parser.add_argument('--scan-device',
         help='only scan the specified device type (in hex)',
         metavar='DEVICE_TYPE',
@@ -469,10 +520,7 @@ def main():
     # TODO: Technically, there is absolutely no need to allocate a buffer this way...
 
     start_time = time.clock()
-    try:
-        args.handler(args)
-    except KeyboardInterrupt:
-        print('Interrupted.')
+    args.handler(args)
     wasted_time = time.clock() - start_time
     print('Time spent: %.2fs' % wasted_time)
 
