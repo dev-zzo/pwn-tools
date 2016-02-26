@@ -303,8 +303,18 @@ def do_scan(args):
         except KeyboardInterrupt:
             print('Interrupted.')
     print('Scan completed (%d IOCTL codes reported).' % len(ioctls))
+
+    if ioctls:
+        print('\nIOCTL codes discovered:')
+        print('   IOCTL   Dev:Fun RW Buffering method')
+        for ioctl in ioctls:
+            device_type = ioctl >> 16
+            function = (ioctl >> 2) & 0xFFF
+            access = (ioctl >> 14) & 3
+            method = ('METHOD_BUFFERED', 'METHOD_IN_DIRECT', 'METHOD_OUT_DIRECT', 'METHOD_NEITHER')[ioctl & 3]
+            print('%08X  %04X:%03X %c%c %s' % (ioctl, device_type, function, 'R-'[not (access & 1)], 'W-'[not (access & 2)], method))
+
     NtClose(handle)
-    return ioctls
 
 #
 # FUZZING (GENERATION/RECORDING)
