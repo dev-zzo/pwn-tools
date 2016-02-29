@@ -268,8 +268,15 @@ def scan_device_type_range(handle, device_start, device_end, not_implemented, io
         scan_device_type(handle, device_type, not_implemented, ioctls)
         device_type += 1
 
+__standard_not_implemented = (
+        0xC0000002L, # STATUS_NOT_IMPLEMENTED
+        0xC0000010L, # STATUS_INVALID_DEVICE_REQUEST
+        0xC00000BBL, # STATUS_NOT_SUPPORTED
+    )
+
 def scan_detect_not_implemented(handle):
     "Detect how the driver responds to IOCTLs that are not implemented"
+    global __standard_not_implemented
 
     print('Detecting how the device responds to not-implemented IOCTLs')
     # Use obviously incorrect IOCTL codes...
@@ -277,14 +284,13 @@ def scan_detect_not_implemented(handle):
     status2 = DeviceIoControl(handle, 0x44440440, None, 0, None, 0)
     if status1 == status2:
         print('Not-implemented NTSTATUS: %08X' % status1)
+        if status1 not in __standard_not_implemented:
+            print('WARNING! The device responds with a non-standard NTSTATUS value.')
+            print('WARNING! The scan results may not report all IOCTLs.')
         return (status1,)
     else:
         print('Got two different responses -- using standard NTSTATUS set')
-        return (
-            0xC0000002L, # STATUS_NOT_IMPLEMENTED
-            0xC0000010L, # STATUS_INVALID_DEVICE_REQUEST
-            0xC00000BBL, # STATUS_NOT_SUPPORTED
-        )
+        return __standard_not_implemented
     
 def do_scan(args):
     "Main scanning function"
