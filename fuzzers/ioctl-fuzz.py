@@ -253,7 +253,7 @@ def scan_device_type(handle, device_type, not_implemented, ioctls):
 
     print('Scanning device type %04X...' % device_type)
     access_type = 0
-    while access_type < 3: # 3 is not used
+    while access_type <= 3:
         scan_functions(handle, device_type, access_type, 0, not_implemented, ioctls)
         scan_functions(handle, device_type, access_type, 1, not_implemented, ioctls)
         scan_functions(handle, device_type, access_type, 2, not_implemented, ioctls)
