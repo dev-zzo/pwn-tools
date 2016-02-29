@@ -198,48 +198,39 @@ def TryOpenFile(path):
 # SCANNING
 #
 
-def scan_ioctl(handle, ioctl_code):
+def scan_ioctl(handle, ioctl_code, probe_buffers=True):
     "Try to figure out additional info about the given IOCTL"
 
     # Check if IOCTL uses no inputs at all.
     status = DeviceIoControl(handle, ioctl_code, None, 0, None, 0)
     if status < 0x40000000L:
         print('  IOCTL responded with no error when no buffers were provided.')
-        return
-    # Try to figure out the input buffer minimum size
-    status = DeviceIoControl(handle, ioctl_code, BUFFER_BASE, 0, BUFFER_BASE, 0x1000)
-    if status == 0xC0000023L: # STATUS_BUFFER_TOO_SMALL
-        size = 0
-        while status == 0xC0000023L and size < 0x1000:
-            size += 2
-            status = DeviceIoControl(handle, ioctl_code, BUFFER_BASE, size, BUFFER_BASE, 0x1000)
-        print('  Guesstimate of minimal input buffer size: %d bytes' % size)
     else:
-        print('  Input buffer size probe returned %08X' % status)
-    # Try to figure out the output buffer minimum size
-    status = DeviceIoControl(handle, ioctl_code, BUFFER_BASE, 0x1000, BUFFER_BASE, 0)
-    if status == 0xC0000023L: # STATUS_BUFFER_TOO_SMALL
-        size = 0
-        while status == 0xC0000023L and size < 0x1000:
-            size += 2
-            status = DeviceIoControl(handle, ioctl_code, BUFFER_BASE, 0x1000, BUFFER_BASE, size)
-        print('  Guesstimate of minimal output buffer size: %d bytes' % size)
-    else:
-        print('  Output buffer size probe returned %08X' % status)
+        if probe_buffers:
+            print('  Will probe for buffer sizes.')
+            # Try to figure out the input buffer minimum size
+            probe_status = DeviceIoControl(handle, ioctl_code, BUFFER_BASE, 0, BUFFER_BASE, 0x1000)
+            if probe_status == 0xC0000023L: # STATUS_BUFFER_TOO_SMALL
+                size = 0
+                while probe_status == 0xC0000023L and size < 0x1000:
+                    size += 2
+                    probe_status = DeviceIoControl(handle, ioctl_code, BUFFER_BASE, size, BUFFER_BASE, 0x1000)
+                print('  Guesstimate of minimal input buffer size: %d bytes' % size)
+            else:
+                print('  Input buffer size probe returned %08X' % probe_status)
+            # Try to figure out the output buffer minimum size
+            probe_status = DeviceIoControl(handle, ioctl_code, BUFFER_BASE, 0x1000, BUFFER_BASE, 0)
+            if probe_status == 0xC0000023L: # STATUS_BUFFER_TOO_SMALL
+                size = 0
+                while probe_status == 0xC0000023L and size < 0x1000:
+                    size += 2
+                    probe_status = DeviceIoControl(handle, ioctl_code, BUFFER_BASE, 0x1000, BUFFER_BASE, size)
+                print('  Guesstimate of minimal output buffer size: %d bytes' % size)
+            else:
+                print('  Output buffer size probe returned %08X' % probe_status)
+    return status
 
-# See: https://msdn.microsoft.com/en-us/library/cc704588.aspx
-__failed_status_codes = (
-        0xC0000002L, # STATUS_NOT_IMPLEMENTED
-        0xC0000010L, # STATUS_INVALID_DEVICE_REQUEST
-        0xC00000BBL, # STATUS_NOT_SUPPORTED
-    )
-
-def scan_validate_status(status):
-    "Check the status code for 'not implemented' IOCTLs"
-
-    return status not in __failed_status_codes
-
-def scan_functions(handle, device_type, req_access, transfer_type, ioctls):
+def scan_functions(handle, device_type, req_access, transfer_type, not_implemented, ioctls):
     "Sweep-scan the `Function Code` field"
 
     # This is constant.
@@ -250,37 +241,58 @@ def scan_functions(handle, device_type, req_access, transfer_type, ioctls):
         ioctl_code = ioctl_template | (func_code << 2)
         # TODO: Some drivers return STATUS_NOT_IMPLEMENTED for incorrect params.
         status = DeviceIoControl(handle, ioctl_code, None, 0, None, 0)
-        if scan_validate_status(status):
+        if status not in not_implemented:
             print('IOCTL %08X: Returned NTSTATUS: %08X' % (ioctl_code, status))
             print('  DeviceType:%04X ReqAcc:%d FunctionCode:%03X XferType:%d' % (device_type, req_access, func_code, transfer_type))
             scan_ioctl(handle, ioctl_code)
             ioctls.append(ioctl_code)
         func_code += 1
 
-def scan_device_type(handle, device_type, ioctls):
+def scan_device_type(handle, device_type, not_implemented, ioctls):
     "Sweep-scan the given `Device Type` for valid IOCTLs"
 
     print('Scanning device type %04X...' % device_type)
     access_type = 0
     while access_type < 3: # 3 is not used
-        scan_functions(handle, device_type, access_type, 0, ioctls)
-        scan_functions(handle, device_type, access_type, 1, ioctls)
-        scan_functions(handle, device_type, access_type, 2, ioctls)
-        scan_functions(handle, device_type, access_type, 3, ioctls)
+        scan_functions(handle, device_type, access_type, 0, not_implemented, ioctls)
+        scan_functions(handle, device_type, access_type, 1, not_implemented, ioctls)
+        scan_functions(handle, device_type, access_type, 2, not_implemented, ioctls)
+        scan_functions(handle, device_type, access_type, 3, not_implemented, ioctls)
         access_type += 1
 
-def scan_device_type_range(handle, device_start, device_end, ioctls):
+def scan_device_type_range(handle, device_start, device_end, not_implemented, ioctls):
     "Scan the specified `Device Type` range"
 
     device_type = device_start
     while device_type <= device_end:
-        scan_device_type(handle, device_type, ioctls)
+        scan_device_type(handle, device_type, not_implemented, ioctls)
         device_type += 1
 
+def scan_detect_not_implemented(handle):
+    "Detect how the driver responds to IOCTLs that are not implemented"
+
+    print('Detecting how the device responds to not-implemented IOCTLs')
+    # Use obviously incorrect IOCTL codes...
+    status1 = DeviceIoControl(handle, 0xFFFFFFFF, None, 0, None, 0)
+    status2 = DeviceIoControl(handle, 0x44440440, None, 0, None, 0)
+    if status1 == status2:
+        print('Not-implemented NTSTATUS: %08X' % status1)
+        return (status1,)
+    else:
+        print('Got two different responses -- using standard NTSTATUS set')
+        return (
+            0xC0000002L, # STATUS_NOT_IMPLEMENTED
+            0xC0000010L, # STATUS_INVALID_DEVICE_REQUEST
+            0xC00000BBL, # STATUS_NOT_SUPPORTED
+        )
+    
 def do_scan(args):
     "Main scanning function"
 
     handle = TryOpenFile(args.device_path)
+    
+    not_implemented = scan_detect_not_implemented(handle)
+    
     ioctls = []
     if args.scan_device is None:
         device_type_low = 0x0000
@@ -292,21 +304,21 @@ def do_scan(args):
         if device_type_low <= device_type_high:
             print('Scanning device type range %04X:%04X' % (device_type_low, device_type_high))
             try:
-                scan_device_type_range(handle, device_type_low, device_type_high, ioctls)
+                scan_device_type_range(handle, device_type_low, device_type_high, not_implemented, ioctls)
             except KeyboardInterrupt:
                 print('Interrupted.')
         else:
             print('Incorrect scan range.')
     else:
         try:
-            scan_device_type(handle, args.scan_device, ioctls)
+            scan_device_type(handle, args.scan_device, not_implemented, ioctls)
         except KeyboardInterrupt:
             print('Interrupted.')
     print('Scan completed (%d IOCTL codes reported).' % len(ioctls))
 
     if ioctls:
         print('\nIOCTL codes discovered:')
-        print('   IOCTL   Dev:Fun RW Buffering method')
+        print('   IOCTL   Dev:Fun RW Transfer type')
         for ioctl in ioctls:
             device_type = ioctl >> 16
             function = (ioctl >> 2) & 0xFFF
@@ -339,11 +351,15 @@ def fuzz_ioctl(handle, ioctl_code, buffer_limits, record=False):
 
     transfer_type = ioctl_code & 3
 
+    if random.random() < 0.2:
+        ctypes.memset(input_ptr, 0xbe, 0x1000)
+    else:
+        ctypes.memset(input_ptr, 0, 0x1000)
+
     # Non-default input pointer?
     if buffer_limits[0][0] > 0 or random.random() < 0.5:
         input_ptr = BUFFER_BASE
 
-        ctypes.memset(input_ptr, 0, 0x1000)
         input_length = random.randint(buffer_limits[0][0], buffer_limits[0][1] + 1)
         fuzz_generate(buffer_ptr, input_length)
 
