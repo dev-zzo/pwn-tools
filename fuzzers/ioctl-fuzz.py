@@ -7,7 +7,7 @@ TO DO list:
 * Implement heuristic scan for input and output buffer sizes.
 * Improve recording performance
 
-Remainder on how control codes are built.
+Reminder on how control codes are built.
 
  3 3 2 2 2 2 2 2 2 2 2 2 1 1 1 1 1 1 1 1 1 1
  1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
@@ -56,6 +56,9 @@ NtClose = ctypes.windll.ntdll.NtClose
 NtAllocateVirtualMemory = ctypes.windll.ntdll.NtAllocateVirtualMemory
 NtDeviceIoControlFile = ctypes.windll.ntdll.NtDeviceIoControlFile
 SetConsoleTitle = ctypes.windll.kernel32.SetConsoleTitleA
+
+# Standard Access Rights
+# https://msdn.microsoft.com/en-us/library/windows/desktop/aa379607(v=vs.85).aspx
 
 FILE_READ_DATA = 0x00000001
 FILE_WRITE_DATA = 0x00000002
@@ -172,28 +175,34 @@ def DeviceIoControl(handle, ioctl, input_ptr, input_length, output_ptr, output_l
     return to_unsigned(status)
 
 def TryOpenFile(path):
+    "Try opening the provided device with most access rights possible"
+
     print('Opening the device...')
     try:
         handle = OpenFile(path, SYNCHRONIZE | READ_CONTROL | FILE_READ_DATA | FILE_WRITE_DATA)
-        print('Opened for R&W.')
+        print('Opened with read and write access.')
         return handle
     except NtError:
         pass
     try:
         handle = OpenFile(path, SYNCHRONIZE | READ_CONTROL | FILE_WRITE_DATA)
-        print('Opened for W.')
+        print('Opened with write access only.')
         return handle
     except NtError:
         pass
     try:
         handle = OpenFile(path, SYNCHRONIZE | READ_CONTROL | FILE_READ_DATA)
-        print('Opened for R.')
+        print('Opened with read access only.')
         return handle
     except NtError:
         pass
-    handle = OpenFile(path, SYNCHRONIZE | READ_CONTROL)
-    print('Opened for minimal access.')
-    return handle
+    try:
+        handle = OpenFile(path, SYNCHRONIZE | READ_CONTROL)
+        print('Opened for minimal access.')
+        return handle
+    except NtError as e:
+        print('Failed to open the device, NTSTATUS of the last attempt: %08X.' % e.status)
+    return None
 #
 # SCANNING
 #
@@ -296,6 +305,8 @@ def do_scan(args):
     "Main scanning function"
 
     handle = TryOpenFile(args.device_path)
+    if handle is None:
+        return
 
     not_implemented = scan_detect_not_implemented(handle)
 
@@ -392,6 +403,8 @@ def do_fuzz(args):
     "Main fuzzing function"
 
     handle = TryOpenFile(args.device_path)
+    if handle is None:
+        return
 
     # Limit input and output buffer sizes.
     buffer_limits = ((args.min_input, args.max_input), (args.min_output, args.max_output))
@@ -439,7 +452,11 @@ def replay_store(ioctl_code, input_ptr, input_length, output_ptr, output_length,
         os.fsync(fp.fileno())
 
 def do_replay(args):
+    "Main replay function"
+
     handle = TryOpenFile(args.device_path)
+    if handle is None:
+        return
 
     fp = open('replay.dump', 'r')
     lineno = 1
@@ -561,7 +578,7 @@ def main():
     wasted_time = time.clock() - start_time
     print('Time spent: %.2fs' % wasted_time)
 
-    print('Exiting.')
+    print('Done.')
 
 if __name__ == "__main__":
     main()
