@@ -291,14 +291,14 @@ def scan_detect_not_implemented(handle):
     else:
         print('Got two different responses -- using standard NTSTATUS set')
         return __standard_not_implemented
-    
+
 def do_scan(args):
     "Main scanning function"
 
     handle = TryOpenFile(args.device_path)
-    
+
     not_implemented = scan_detect_not_implemented(handle)
-    
+
     ioctls = []
     if args.scan_device is None:
         device_type_low = 0x0000
@@ -349,7 +349,7 @@ def fuzz_generate(buffer_ptr, input_length):
             buffer_ptr[offset] = random.choice(__nasty_bytes)
         offset += 1
 
-def fuzz_ioctl(handle, ioctl_code, buffer_limits, record=False):
+def fuzz_ioctl(handle, ioctl_code, buffer_limits, record=False, record_last=False):
     "Perform one fuzzing interation over the given ioctl"
 
     # Initial conditions
@@ -382,7 +382,7 @@ def fuzz_ioctl(handle, ioctl_code, buffer_limits, record=False):
             output_ptr = 0xDEAD0000
 
     if record:
-        replay_store(ioctl_code, input_ptr, input_length, output_ptr, output_length)
+        replay_store(ioctl_code, input_ptr, input_length, output_ptr, output_length, record_last)
 
     # Execute
     status = DeviceIoControl(handle, ioctl_code, input_ptr, input_length, output_ptr, output_length)
@@ -402,7 +402,7 @@ def do_fuzz(args):
         counter2 = 0
         # Loop forever.
         while True:
-            status = fuzz_ioctl(handle, args.ioctl, buffer_limits, args.record)
+            status = fuzz_ioctl(handle, args.ioctl, buffer_limits, args.record, args.record_last)
             try:
                 result_stats[status] = result_stats[status] + 1
             except KeyError:
@@ -424,14 +424,15 @@ def do_fuzz(args):
 # FUZZING (REPLAYING)
 #
 
-def replay_store(ioctl_code, input_ptr, input_length, output_ptr, output_length):
+def replay_store(ioctl_code, input_ptr, input_length, output_ptr, output_length, overwrite=False):
     offset = 0
     b = []
     while offset < input_length:
         b.append('%d' % buffer_ptr[offset])
         offset += 1
     s = "(0x%08XL, 0x%08XL, 0x%08XL, 0x%08XL, 0x%08XL, [%s])\n" % (ioctl_code, input_ptr, input_length, output_ptr, output_length, ', '.join(b))
-    with open('replay.dump', 'a') as fp:
+    mode = ('a', 'w')[overwrite]
+    with open('replay.dump', mode) as fp:
         fp.write(s)
         # Force cache cleaning so if the crap crashes, we have the data on disk already
         fp.flush()
@@ -521,7 +522,11 @@ def main():
         type=auto_int,
         default=0x100)
     fuzz_parser.add_argument('--record',
-        help='record all IOCTL traffic',
+        help='record generated IOCTL traffic',
+        default=False,
+        action='store_true')
+    fuzz_parser.add_argument('--record-last',
+        help='record only the last IOCTL',
         default=False,
         action='store_true')
     fuzz_parser.set_defaults(handler=do_fuzz)
