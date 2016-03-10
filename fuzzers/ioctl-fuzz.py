@@ -181,28 +181,28 @@ def TryOpenFile(path):
     try:
         handle = OpenFile(path, SYNCHRONIZE | READ_CONTROL | FILE_READ_DATA | FILE_WRITE_DATA)
         print('Opened with read and write access.')
-        return handle
+        return (handle, FILE_READ_ACCESS|FILE_WRITE_ACCESS)
     except NtError:
         pass
     try:
         handle = OpenFile(path, SYNCHRONIZE | READ_CONTROL | FILE_WRITE_DATA)
         print('Opened with write access only.')
-        return handle
+        return (handle, FILE_WRITE_ACCESS)
     except NtError:
         pass
     try:
         handle = OpenFile(path, SYNCHRONIZE | READ_CONTROL | FILE_READ_DATA)
         print('Opened with read access only.')
-        return handle
+        return (handle, FILE_READ_ACCESS)
     except NtError:
         pass
     try:
         handle = OpenFile(path, SYNCHRONIZE | READ_CONTROL)
         print('Opened for minimal access.')
-        return handle
+        return (handle, 0)
     except NtError as e:
         print('Failed to open the device, NTSTATUS of the last attempt: %08X.' % e.status)
-    return None
+    return (None, 0)
 #
 # SCANNING
 #
@@ -257,24 +257,30 @@ def scan_functions(handle, device_type, req_access, transfer_type, not_implement
             ioctls.append(ioctl_code)
         func_code += 1
 
-def scan_device_type(handle, device_type, not_implemented, ioctls):
+def scan_device_type_xfers(handle, device_type, access_type, not_implemented, ioctls):
+    scan_functions(handle, device_type, access_type, 0, not_implemented, ioctls)
+    scan_functions(handle, device_type, access_type, 1, not_implemented, ioctls)
+    scan_functions(handle, device_type, access_type, 2, not_implemented, ioctls)
+    scan_functions(handle, device_type, access_type, 3, not_implemented, ioctls)
+
+def scan_device_type(handle, granted_access, device_type, not_implemented, ioctls):
     "Sweep-scan the given `Device Type` for valid IOCTLs"
 
     print('Scanning device type %04X...' % device_type)
-    access_type = 0
-    while access_type <= 3:
-        scan_functions(handle, device_type, access_type, 0, not_implemented, ioctls)
-        scan_functions(handle, device_type, access_type, 1, not_implemented, ioctls)
-        scan_functions(handle, device_type, access_type, 2, not_implemented, ioctls)
-        scan_functions(handle, device_type, access_type, 3, not_implemented, ioctls)
-        access_type += 1
+    scan_device_type_xfers(handle, device_type, 0, not_implemented, ioctls)
+    if granted_access & FILE_READ_ACCESS:
+        scan_device_type_xfers(handle, device_type, 1, not_implemented, ioctls)
+    if granted_access & FILE_WRITE_ACCESS:
+        scan_device_type_xfers(handle, device_type, 2, not_implemented, ioctls)
+    if granted_access == (FILE_READ_ACCESS|FILE_WRITE_ACCESS):
+        scan_device_type_xfers(handle, device_type, 3, not_implemented, ioctls)
 
-def scan_device_type_range(handle, device_start, device_end, not_implemented, ioctls):
+def scan_device_type_range(handle, granted_access, device_start, device_end, not_implemented, ioctls):
     "Scan the specified `Device Type` range"
 
     device_type = device_start
     while device_type <= device_end:
-        scan_device_type(handle, device_type, not_implemented, ioctls)
+        scan_device_type(handle, granted_access, device_type, not_implemented, ioctls)
         device_type += 1
 
 __standard_not_implemented = (
@@ -283,32 +289,44 @@ __standard_not_implemented = (
         0xC00000BBL, # STATUS_NOT_SUPPORTED
     )
 
-def scan_detect_not_implemented(handle):
+def scan_detect_not_implemented(handle, granted_access):
     "Detect how the driver responds to IOCTLs that are not implemented"
     global __standard_not_implemented
 
     print('Detecting how the device responds to not-implemented IOCTLs')
-    # Use obviously incorrect IOCTL codes...
-    status1 = DeviceIoControl(handle, 0xFFFFFFFF, None, 0, None, 0)
-    status2 = DeviceIoControl(handle, 0x44440440, None, 0, None, 0)
-    if status1 == status2:
-        print('Not-implemented NTSTATUS: %08X' % status1)
-        if status1 not in __standard_not_implemented:
-            print('WARNING! The device responds with a non-standard NTSTATUS value.')
-            print('WARNING! The scan results may not report all IOCTLs.')
-        return (status1,)
-    else:
-        print('Got two different responses -- using standard NTSTATUS set')
-        return __standard_not_implemented
+    stats = {}
+    for counter in xrange(128):
+        ioctl = random.randint(0, 0xFFFFL) << 16
+        status = DeviceIoControl(handle, ioctl, None, 0, None, 0)
+        try:
+            count = stats[status] + 1
+        except KeyError:
+            count = 1
+        stats[status] = count
+
+    max_count = 0
+    chosen_status = 0
+    for status, count in stats.iteritems():
+        if count > max_count:
+            max_count = count
+            chosen_status = status
+
+    print('Not-implemented NTSTATUS: %08X (hit %d times)' % (chosen_status, max_count))
+    if chosen_status not in __standard_not_implemented:
+        print('WARNING! The device responds with a non-standard NTSTATUS value.')
+        print('WARNING! The scan results may not report all IOCTLs.')
+    return (chosen_status,)
 
 def do_scan(args):
     "Main scanning function"
 
-    handle = TryOpenFile(args.device_path)
+    handle, access = TryOpenFile(args.device_path)
     if handle is None:
         return
+    if args.ignore_granted_access:
+        access = FILE_READ_ACCESS|FILE_WRITE_ACCESS
 
-    not_implemented = scan_detect_not_implemented(handle)
+    not_implemented = scan_detect_not_implemented(handle, access)
 
     ioctls = []
     if args.scan_device is None:
@@ -321,14 +339,14 @@ def do_scan(args):
         if device_type_low <= device_type_high:
             print('Scanning device type range %04X:%04X' % (device_type_low, device_type_high))
             try:
-                scan_device_type_range(handle, device_type_low, device_type_high, not_implemented, ioctls)
+                scan_device_type_range(handle, access, device_type_low, device_type_high, not_implemented, ioctls)
             except KeyboardInterrupt:
                 print('Interrupted.')
         else:
             print('Incorrect scan range.')
     else:
         try:
-            scan_device_type(handle, args.scan_device, not_implemented, ioctls)
+            scan_device_type(handle, access, args.scan_device, not_implemented, ioctls)
         except KeyboardInterrupt:
             print('Interrupted.')
     print('Scan completed (%d IOCTL codes reported).' % len(ioctls))
@@ -402,7 +420,7 @@ def fuzz_ioctl(handle, ioctl_code, buffer_limits, record=False, record_last=Fals
 def do_fuzz(args):
     "Main fuzzing function"
 
-    handle = TryOpenFile(args.device_path)
+    handle, access = TryOpenFile(args.device_path)
     if handle is None:
         return
 
@@ -454,7 +472,7 @@ def replay_store(ioctl_code, input_ptr, input_length, output_ptr, output_length,
 def do_replay(args):
     "Main replay function"
 
-    handle = TryOpenFile(args.device_path)
+    handle, access = TryOpenFile(args.device_path)
     if handle is None:
         return
 
@@ -508,6 +526,10 @@ def main():
         action='store_true')
     scan_parser.add_argument('--scan-vendor',
         help='only scan for IOCTL device types 8000:FFFF',
+        default=False,
+        action='store_true')
+    scan_parser.add_argument('--ignore-granted-access',
+        help='ignore access rights granted to handle',
         default=False,
         action='store_true')
     scan_parser.set_defaults(handler=do_scan)
