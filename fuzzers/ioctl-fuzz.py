@@ -373,6 +373,12 @@ def fuzz_generate(buffer_ptr, input_length):
     "Generate the data passed to the ioctl"
 
     global __nasty_bytes
+
+    if random.random() < 0.2:
+        ctypes.memset(buffer_ptr, 0xbe, 0x1000)
+    else:
+        ctypes.memset(buffer_ptr, 0, 0x1000)
+
     for offset in xrange(input_length):
         if random.random() <= 0.2:
             buffer_ptr[offset] = random.choice(__nasty_bytes)
@@ -385,11 +391,6 @@ def fuzz_ioctl(handle, ioctl_code, buffer_limits, record=False, record_last=Fals
     input_ptr, input_length, output_ptr, output_length = 0, 0, 0, 0
 
     transfer_type = ioctl_code & 3
-
-    if random.random() < 0.2:
-        ctypes.memset(input_ptr, 0xbe, 0x1000)
-    else:
-        ctypes.memset(input_ptr, 0, 0x1000)
 
     # Non-default input pointer?
     if buffer_limits[0][0] > 0 or random.random() < 0.5:
