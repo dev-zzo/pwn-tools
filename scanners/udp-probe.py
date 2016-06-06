@@ -1,5 +1,6 @@
+#!/usr/bin/python
 """
-UDP Service Prober version 0.1 by dev_zzo
+UDP Service Scanner version 0.1 by dev_zzo
 
 This work has largely been inspired by:
 https://github.com/portcullislabs/udp-proto-scanner
