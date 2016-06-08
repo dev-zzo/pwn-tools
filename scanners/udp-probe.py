@@ -122,7 +122,7 @@ def scan_main(args):
             s.settimeout(0.0)
 
             # print("Waiting for replies...")
-            time.sleep(1.0)
+            time.sleep(args.delay)
 
             while True:
                 try:
@@ -161,6 +161,10 @@ def __main():
     parser = argparse.ArgumentParser(description='UDP Service Scanner')
     parser.add_argument('targets', metavar='target', nargs='+',
         help='IP address or range (ip/mask, ip-ip)')
+    parser.add_argument('--delay',
+        type=float,
+        default=1.0,
+        help='Time to wait (seconds) before moving on to the next probe')
     args = parser.parse_args()
     scan_main(args)
 
